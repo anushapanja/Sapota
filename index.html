@@ -1,0 +1,588 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MindFlow - Simple Mind Map</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; overflow: hidden; background: #1a1a2e; }
+    #canvas { width: 100vw; height: 100vh; position: relative; }
+    svg { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 0; }
+    .node {
+      position: absolute; min-width: 120px; max-width: 280px; padding: 12px 16px;
+      background: #16213e; border: 2px solid #0f3460; border-radius: 12px;
+      color: #e8e8e8; cursor: grab; user-select: none; z-index: 10;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.3); transition: box-shadow 0.2s, border-color 0.2s;
+    }
+    .node:hover { border-color: #7b2cbf; box-shadow: 0 6px 30px rgba(123,44,191,0.3); }
+    .node.selected { border-color: #9d4edd; box-shadow: 0 0 0 3px rgba(157,78,221,0.4); }
+    .node.linking { border-color: #00ff88; animation: pulse 0.8s infinite; }
+    @keyframes pulse { 0%,100% { box-shadow: 0 0 0 3px rgba(0,255,136,0.4); } 50% { box-shadow: 0 0 0 6px rgba(0,255,136,0.2); } }
+    .node-text { outline: none; min-height: 20px; word-wrap: break-word; font-size: 14px; line-height: 1.4; }
+    .node-text:focus { background: rgba(255,255,255,0.05); border-radius: 4px; padding: 2px 4px; margin: -2px -4px; }
+    .tasks-container { margin-top: 10px; border-top: 1px solid #0f3460; padding-top: 8px; }
+    .task-item { display: flex; align-items: flex-start; gap: 8px; margin: 4px 0; font-size: 12px; color: #b8b8b8; }
+    .task-item input[type="checkbox"] { margin-top: 2px; accent-color: #7b2cbf; cursor: pointer; }
+    .task-item.done span { text-decoration: line-through; opacity: 0.6; }
+    .progress-bar { height: 4px; background: #0f3460; border-radius: 2px; margin-top: 8px; overflow: hidden; }
+    .progress-fill { height: 100%; background: linear-gradient(90deg, #7b2cbf, #00ff88); transition: width 0.3s; }
+    .controls { position: fixed; top: 20px; left: 20px; z-index: 100; display: flex; gap: 10px; flex-wrap: wrap; }
+    .btn {
+      padding: 12px 20px; border: none; border-radius: 8px; font-size: 14px; font-weight: 600;
+      cursor: pointer; transition: transform 0.2s, box-shadow 0.2s;
+    }
+    .btn:hover { transform: translateY(-2px); }
+    .btn:active { transform: translateY(0); }
+    .btn-primary { background: linear-gradient(135deg, #7b2cbf, #9d4edd); color: white; box-shadow: 0 4px 15px rgba(123,44,191,0.4); }
+    .btn-secondary { background: #16213e; color: #e8e8e8; border: 2px solid #0f3460; }
+    .btn-secondary:hover { border-color: #7b2cbf; }
+    .status { position: fixed; bottom: 20px; right: 20px; padding: 8px 16px; background: rgba(22,33,62,0.9); color: #888; font-size: 12px; border-radius: 6px; z-index: 100; }
+    .status.saving { color: #ffc107; }
+    .status.saved { color: #00ff88; }
+    .status.error { color: #ff4757; }
+    .context-menu {
+      position: fixed; background: #16213e; border: 1px solid #0f3460; border-radius: 8px;
+      padding: 8px 0; z-index: 1000; box-shadow: 0 10px 40px rgba(0,0,0,0.5); min-width: 150px;
+    }
+    .context-menu-item { padding: 10px 16px; color: #e8e8e8; cursor: pointer; font-size: 13px; }
+    .context-menu-item:hover { background: #0f3460; }
+    .board-id { position: fixed; top: 20px; right: 20px; color: #666; font-size: 12px; z-index: 100; }
+    .board-id a { color: #7b2cbf; text-decoration: none; }
+    .board-id a:hover { text-decoration: underline; }
+    .help { position: fixed; bottom: 20px; left: 20px; color: #444; font-size: 11px; z-index: 100; }
+  </style>
+</head>
+<body>
+  <div id="canvas">
+    <svg id="connections"></svg>
+  </div>
+  <div class="controls">
+    <button class="btn btn-primary" id="aiBtn">AI → Tasks</button>
+    <button class="btn btn-secondary" id="newBoardBtn">New Board</button>
+  </div>
+  <div class="board-id" id="boardInfo"></div>
+  <div class="status" id="status">Ready</div>
+  <div class="help">Double-click: new node | Drag: move | Click: edit | Delete: remove | Right-click: link nodes</div>
+
+  <script>
+    // === CONFIG ===
+    // Replace this with your JSONBin bin ID, or leave empty to use anonymous create
+    const JSONBIN_BIN_ID = ''; // e.g., '507f1f77bcf86cd799439011'
+    const JSONBIN_API = 'https://api.jsonbin.io/v3';
+    const WORKER_URL = 'YOUR_CLOUDFLARE_WORKER_URL'; // Replace with your deployed worker URL
+
+    // === STATE ===
+    let nodes = [];
+    let selectedNode = null;
+    let linkingFrom = null;
+    let dragState = null;
+    let saveTimeout = null;
+    let boardId = null;
+    let binId = null;
+
+    // === INIT ===
+    function init() {
+      const params = new URLSearchParams(window.location.search);
+      boardId = params.get('board');
+
+      if (boardId) {
+        document.getElementById('boardInfo').innerHTML = `Board: <a href="?board=${boardId}">${boardId}</a>`;
+        loadBoard();
+      } else {
+        document.getElementById('boardInfo').textContent = 'No board loaded';
+      }
+
+      setupEventListeners();
+    }
+
+    // === BOARD ID GENERATION ===
+    function generateBoardId() {
+      const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+      let id = '';
+      for (let i = 0; i < 6; i++) id += chars[Math.floor(Math.random() * chars.length)];
+      return id;
+    }
+
+    function generateNodeId() {
+      return 'n' + Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
+    }
+
+    // === JSONBIN OPERATIONS ===
+    async function loadBoard() {
+      if (!boardId) return;
+      setStatus('Loading...', 'saving');
+
+      try {
+        // Try to load from localStorage first (for bin ID mapping)
+        const storedBinId = localStorage.getItem(`mindflow_bin_${boardId}`);
+        if (storedBinId) {
+          binId = storedBinId;
+          const res = await fetch(`${JSONBIN_API}/b/${binId}/latest`);
+          if (res.ok) {
+            const data = await res.json();
+            nodes = data.record.nodes || [];
+            renderAllNodes();
+            setStatus('Loaded', 'saved');
+            return;
+          }
+        }
+
+        // No stored bin, start fresh
+        nodes = [];
+        setStatus('New board', 'saved');
+      } catch (e) {
+        console.error('Load error:', e);
+        setStatus('Load failed', 'error');
+      }
+    }
+
+    async function saveBoard() {
+      if (!boardId) return;
+      setStatus('Saving...', 'saving');
+
+      const data = { boardId, nodes, updatedAt: new Date().toISOString() };
+
+      try {
+        if (binId) {
+          // Update existing bin
+          const res = await fetch(`${JSONBIN_API}/b/${binId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+          });
+          if (!res.ok) throw new Error('Update failed');
+        } else {
+          // Create new bin
+          const res = await fetch(`${JSONBIN_API}/b`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+          });
+          if (!res.ok) throw new Error('Create failed');
+          const result = await res.json();
+          binId = result.metadata.id;
+          localStorage.setItem(`mindflow_bin_${boardId}`, binId);
+        }
+        setStatus('Saved', 'saved');
+      } catch (e) {
+        console.error('Save error:', e);
+        setStatus('Save failed', 'error');
+      }
+    }
+
+    function scheduleSave() {
+      if (saveTimeout) clearTimeout(saveTimeout);
+      saveTimeout = setTimeout(saveBoard, 2000);
+      setStatus('Pending...', '');
+    }
+
+    function setStatus(text, className) {
+      const el = document.getElementById('status');
+      el.textContent = text;
+      el.className = 'status ' + (className || '');
+    }
+
+    // === NODE OPERATIONS ===
+    function createNode(x, y, text = 'New idea', parentId = null) {
+      if (!boardId) {
+        boardId = generateBoardId();
+        window.history.pushState({}, '', `?board=${boardId}`);
+        document.getElementById('boardInfo').innerHTML = `Board: <a href="?board=${boardId}">${boardId}</a>`;
+      }
+
+      const node = {
+        id: generateNodeId(),
+        x, y,
+        text,
+        parentId,
+        tasks: []
+      };
+      nodes.push(node);
+      renderNode(node);
+      drawConnections();
+      scheduleSave();
+      return node;
+    }
+
+    function deleteNode(nodeId) {
+      // Remove node and update children
+      nodes = nodes.filter(n => n.id !== nodeId);
+      nodes.forEach(n => { if (n.parentId === nodeId) n.parentId = null; });
+
+      const el = document.getElementById(nodeId);
+      if (el) el.remove();
+
+      if (selectedNode === nodeId) selectedNode = null;
+      drawConnections();
+      scheduleSave();
+    }
+
+    function updateNodePosition(nodeId, x, y) {
+      const node = nodes.find(n => n.id === nodeId);
+      if (node) {
+        node.x = x;
+        node.y = y;
+        scheduleSave();
+      }
+    }
+
+    function updateNodeText(nodeId, text) {
+      const node = nodes.find(n => n.id === nodeId);
+      if (node) {
+        node.text = text;
+        scheduleSave();
+      }
+    }
+
+    function linkNodes(fromId, toId) {
+      const child = nodes.find(n => n.id === toId);
+      if (child && fromId !== toId) {
+        child.parentId = fromId;
+        drawConnections();
+        scheduleSave();
+      }
+    }
+
+    function unlinkNode(nodeId) {
+      const node = nodes.find(n => n.id === nodeId);
+      if (node) {
+        node.parentId = null;
+        drawConnections();
+        scheduleSave();
+      }
+    }
+
+    // === RENDERING ===
+    function renderNode(node) {
+      const existing = document.getElementById(node.id);
+      if (existing) existing.remove();
+
+      const el = document.createElement('div');
+      el.className = 'node' + (selectedNode === node.id ? ' selected' : '');
+      el.id = node.id;
+      el.style.left = node.x + 'px';
+      el.style.top = node.y + 'px';
+
+      el.innerHTML = `
+        <div class="node-text" contenteditable="true">${escapeHtml(node.text)}</div>
+        ${renderTasks(node)}
+      `;
+
+      document.getElementById('canvas').appendChild(el);
+      setupNodeEvents(el, node);
+    }
+
+    function renderTasks(node) {
+      if (!node.tasks || node.tasks.length === 0) return '';
+
+      const done = node.tasks.filter(t => t.done).length;
+      const total = node.tasks.length;
+      const pct = Math.round((done / total) * 100);
+
+      return `
+        <div class="tasks-container">
+          ${node.tasks.map((t, i) => `
+            <div class="task-item ${t.done ? 'done' : ''}">
+              <input type="checkbox" data-task="${i}" ${t.done ? 'checked' : ''}>
+              <span>${escapeHtml(t.text)}</span>
+            </div>
+          `).join('')}
+          <div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div>
+        </div>
+      `;
+    }
+
+    function renderAllNodes() {
+      document.querySelectorAll('.node').forEach(el => el.remove());
+      nodes.forEach(n => renderNode(n));
+      drawConnections();
+    }
+
+    function drawConnections() {
+      const svg = document.getElementById('connections');
+      svg.innerHTML = '';
+
+      nodes.forEach(node => {
+        if (!node.parentId) return;
+        const parent = nodes.find(n => n.id === node.parentId);
+        if (!parent) return;
+
+        const parentEl = document.getElementById(parent.id);
+        const childEl = document.getElementById(node.id);
+        if (!parentEl || !childEl) return;
+
+        const px = parent.x + parentEl.offsetWidth / 2;
+        const py = parent.y + parentEl.offsetHeight / 2;
+        const cx = node.x + childEl.offsetWidth / 2;
+        const cy = node.y + childEl.offsetHeight / 2;
+
+        const midX = (px + cx) / 2;
+        const cp1x = midX, cp1y = py;
+        const cp2x = midX, cp2y = cy;
+
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('d', `M${px},${py} C${cp1x},${cp1y} ${cp2x},${cp2y} ${cx},${cy}`);
+        path.setAttribute('stroke', '#7b2cbf');
+        path.setAttribute('stroke-width', '2');
+        path.setAttribute('fill', 'none');
+        path.setAttribute('opacity', '0.6');
+        svg.appendChild(path);
+      });
+    }
+
+    // === EVENT HANDLERS ===
+    function setupEventListeners() {
+      const canvas = document.getElementById('canvas');
+
+      // Double-click to create node
+      canvas.addEventListener('dblclick', e => {
+        if (e.target === canvas || e.target.tagName === 'svg') {
+          createNode(e.clientX - 60, e.clientY - 20);
+        }
+      });
+
+      // Click to deselect
+      canvas.addEventListener('click', e => {
+        if (e.target === canvas || e.target.tagName === 'svg') {
+          deselectAll();
+          if (linkingFrom) cancelLinking();
+        }
+      });
+
+      // Delete key
+      document.addEventListener('keydown', e => {
+        if (e.key === 'Delete' && selectedNode && document.activeElement.className !== 'node-text') {
+          deleteNode(selectedNode);
+        }
+        if (e.key === 'Escape') {
+          cancelLinking();
+          deselectAll();
+        }
+      });
+
+      // Context menu
+      document.addEventListener('contextmenu', e => {
+        const nodeEl = e.target.closest('.node');
+        if (nodeEl) {
+          e.preventDefault();
+          showContextMenu(e.clientX, e.clientY, nodeEl.id);
+        }
+      });
+
+      document.addEventListener('click', () => hideContextMenu());
+
+      // New board button
+      document.getElementById('newBoardBtn').addEventListener('click', () => {
+        const newId = generateBoardId();
+        window.location.href = `?board=${newId}`;
+      });
+
+      // AI button
+      document.getElementById('aiBtn').addEventListener('click', generateTasks);
+
+      // Window resize
+      window.addEventListener('resize', drawConnections);
+    }
+
+    function setupNodeEvents(el, node) {
+      const textEl = el.querySelector('.node-text');
+
+      // Click to select
+      el.addEventListener('click', e => {
+        if (e.target.type === 'checkbox') return;
+
+        if (linkingFrom && linkingFrom !== node.id) {
+          linkNodes(linkingFrom, node.id);
+          cancelLinking();
+          return;
+        }
+
+        selectNode(node.id);
+      });
+
+      // Drag
+      el.addEventListener('mousedown', e => {
+        if (e.target.isContentEditable || e.target.type === 'checkbox' || e.button !== 0) return;
+
+        dragState = {
+          nodeId: node.id,
+          startX: e.clientX,
+          startY: e.clientY,
+          nodeX: node.x,
+          nodeY: node.y
+        };
+        el.style.cursor = 'grabbing';
+        e.preventDefault();
+      });
+
+      document.addEventListener('mousemove', e => {
+        if (!dragState || dragState.nodeId !== node.id) return;
+
+        const dx = e.clientX - dragState.startX;
+        const dy = e.clientY - dragState.startY;
+        const newX = Math.max(0, dragState.nodeX + dx);
+        const newY = Math.max(0, dragState.nodeY + dy);
+
+        el.style.left = newX + 'px';
+        el.style.top = newY + 'px';
+        node.x = newX;
+        node.y = newY;
+        drawConnections();
+      });
+
+      document.addEventListener('mouseup', () => {
+        if (dragState && dragState.nodeId === node.id) {
+          el.style.cursor = 'grab';
+          updateNodePosition(node.id, node.x, node.y);
+          dragState = null;
+        }
+      });
+
+      // Text editing
+      textEl.addEventListener('blur', () => {
+        updateNodeText(node.id, textEl.textContent.trim() || 'New idea');
+      });
+
+      textEl.addEventListener('keydown', e => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          textEl.blur();
+        }
+      });
+
+      // Task checkboxes
+      el.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+        cb.addEventListener('change', () => {
+          const idx = parseInt(cb.dataset.task);
+          node.tasks[idx].done = cb.checked;
+          renderNode(node);
+          scheduleSave();
+        });
+      });
+    }
+
+    function selectNode(nodeId) {
+      deselectAll();
+      selectedNode = nodeId;
+      const el = document.getElementById(nodeId);
+      if (el) el.classList.add('selected');
+    }
+
+    function deselectAll() {
+      document.querySelectorAll('.node.selected').forEach(el => el.classList.remove('selected'));
+      selectedNode = null;
+    }
+
+    // === CONTEXT MENU ===
+    function showContextMenu(x, y, nodeId) {
+      hideContextMenu();
+
+      const node = nodes.find(n => n.id === nodeId);
+      const menu = document.createElement('div');
+      menu.className = 'context-menu';
+      menu.id = 'contextMenu';
+      menu.style.left = x + 'px';
+      menu.style.top = y + 'px';
+
+      menu.innerHTML = `
+        <div class="context-menu-item" data-action="link">Link to...</div>
+        ${node.parentId ? '<div class="context-menu-item" data-action="unlink">Unlink from parent</div>' : ''}
+        <div class="context-menu-item" data-action="delete">Delete node</div>
+      `;
+
+      menu.querySelectorAll('.context-menu-item').forEach(item => {
+        item.addEventListener('click', () => {
+          const action = item.dataset.action;
+          if (action === 'link') startLinking(nodeId);
+          else if (action === 'unlink') unlinkNode(nodeId);
+          else if (action === 'delete') deleteNode(nodeId);
+          hideContextMenu();
+        });
+      });
+
+      document.body.appendChild(menu);
+    }
+
+    function hideContextMenu() {
+      const menu = document.getElementById('contextMenu');
+      if (menu) menu.remove();
+    }
+
+    function startLinking(nodeId) {
+      linkingFrom = nodeId;
+      const el = document.getElementById(nodeId);
+      if (el) el.classList.add('linking');
+      setStatus('Click another node to link', '');
+    }
+
+    function cancelLinking() {
+      if (linkingFrom) {
+        const el = document.getElementById(linkingFrom);
+        if (el) el.classList.remove('linking');
+        linkingFrom = null;
+        setStatus('Ready', '');
+      }
+    }
+
+    // === AI TASKS ===
+    async function generateTasks() {
+      if (nodes.length === 0) {
+        setStatus('Add nodes first', 'error');
+        return;
+      }
+
+      setStatus('Generating tasks...', 'saving');
+      const btn = document.getElementById('aiBtn');
+      btn.disabled = true;
+      btn.textContent = 'Working...';
+
+      try {
+        const nodeTexts = nodes.map(n => ({ id: n.id, text: n.text }));
+
+        const res = await fetch(WORKER_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ nodes: nodeTexts })
+        });
+
+        if (!res.ok) throw new Error('AI request failed');
+
+        const data = await res.json();
+
+        // Distribute tasks to nodes
+        if (Array.isArray(data.tasks)) {
+          // Simple distribution: assign tasks to nodes round-robin or based on relevance
+          const tasksPerNode = Math.ceil(data.tasks.length / nodes.length);
+
+          nodes.forEach((node, i) => {
+            const start = i * tasksPerNode;
+            const nodeTasks = data.tasks.slice(start, start + tasksPerNode);
+            node.tasks = nodeTasks.map(t => ({ text: t, done: false }));
+          });
+
+          renderAllNodes();
+          scheduleSave();
+          setStatus('Tasks generated!', 'saved');
+        }
+      } catch (e) {
+        console.error('AI error:', e);
+        setStatus('AI failed - check worker URL', 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'AI → Tasks';
+      }
+    }
+
+    // === UTILS ===
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    // === START ===
+    init();
+  </script>
+</body>
+</html>
