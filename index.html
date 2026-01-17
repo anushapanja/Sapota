@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>MindFlow - Simple Mind Map</title>
+  <title>Sapotato - Simple Mind Map</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; overflow: hidden; background: #1a1a2e; }
@@ -115,7 +115,7 @@
 
       try {
         // Try to load from localStorage first (for bin ID mapping)
-        const storedBinId = localStorage.getItem(`mindflow_bin_${boardId}`);
+        const storedBinId = localStorage.getItem(`Sapotato_bin_${boardId}`);
         if (storedBinId) {
           binId = storedBinId;
           const res = await fetch(`${JSONBIN_API}/b/${binId}/latest`);
@@ -162,7 +162,7 @@
           if (!res.ok) throw new Error('Create failed');
           const result = await res.json();
           binId = result.metadata.id;
-          localStorage.setItem(`mindflow_bin_${boardId}`, binId);
+          localStorage.setItem(`Sapotato_bin_${boardId}`, binId);
         }
         setStatus('Saved', 'saved');
       } catch (e) {
